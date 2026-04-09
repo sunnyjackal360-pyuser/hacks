@@ -3,7 +3,7 @@
     'use strict';
 (() => {
     let iframe = document.querySelector("iframe");
-    /* By CryptoDude3 */
+    /* By sunnyjackal365 */
     if (window.fetch.call.toString() == 'function call() { [native code] }') {
         const call = window.fetch.call;
         window.fetch.call = function () {
