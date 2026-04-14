@@ -1,0 +1,373 @@
+import requests
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import InvalidSessionIdException, TimeoutException, ElementNotInteractableException
+import time
+import logging
+import sys
+import re
+import os
+import signal
+import psutil
+
+# Colab detection and installation
+import sys
+if 'google.colab' in sys.modules:
+    #!pip install -q selenium webdriver-manager google-generativeai beautifulsoup4 requests
+    from google.colab import drive  # Optional, if needed for files
+
+# --- START GEMINI IMPORTS & CONFIG ---
+import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions 
+# --- END GEMINI IMPORTS & CONFIG ---
+
+# Add webdriver_manager for auto-matching ChromeDriver
+from webdriver_manager.chrome import ChromeDriverManager
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('ixl_script.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Google Gemini API key and Model Configuration
+GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY_HERE' 
+GEMINI_MODEL = 'gemini-2.5-flash-lite' 
+
+# IXL credentials
+IXL_USERNAME = 'YOUR_IXL_USERNAME'
+IXL_PASSWORD = 'YOUR_IXL_PASSWORD'
+
+# Global Gemini Client
+GEMINI_CLIENT = None
+
+def kill_chromedriver_processes():
+    """Kill only chromedriver.exe processes."""
+    logger.info("Checking for and killing any existing ChromeDriver processes")
+    for proc in psutil.process_iter(['name']):
+        if proc.info['name'] == 'chromedriver.exe':
+            try:
+                os.kill(proc.pid, signal.SIGTERM)
+                logger.info(f"Killed ChromeDriver process with PID {proc.pid}")
+            except Exception as e:
+                logger.warning(f"Failed to kill ChromeDriver process {proc.pid}: {e}")
+
+def extract_raw_question_html(html_content):
+    """
+    Extracts the raw HTML snippet of the entire question block with class 'ixl-practice-crate'.
+    """
+    soup = BeautifulSoup(html_content, 'html.parser')
+    # Target the specific section with class 'ixl-practice-crate'
+    section = soup.find('section', class_='ixl-practice-crate')
+    
+    if not section:
+        return ""
+        
+    section_html = str(section)
+    return section_html
+
+def get_gemini_answer(model_name, raw_html):
+    """
+    Sends the raw HTML of the question block to Gemini,
+    asking it to interpret the math problem, solve it, and return the result
+    in a plain text format.
+    """
+    global GEMINI_CLIENT
+    
+    # The instruction tells the AI to do the parsing/interpretation first, then solve in plain text.
+    full_prompt = (
+        "You are an expert reading solver specializing in parsing complex web code. "
+        "Your task is to: "
+        "1. **Analyze the provided HTML code block** to accurately determine the exact reading problem (function evaluation, equation, etc.). Convert all ambiguous notation (like nested divs for fractions, or implicit multiplication) into a clear mathematical text string. "
+        "2. **Solve the math problem.** Always follow standard order of operations (PEMDAS/BODMAS): Parentheses/Brackets, Exponents/Orders, Multiplication-Division (left to right), Addition-Subtraction (left to right)."
+        "3. **Return ONLY in this exact plain text format, nothing else:** Question: [clear text of the reading problem you interpreted] Answer: [final sovled subject in a. b. c. d. or answer/expression]\n\n"
+        "--- START QUESTION HTML ---\n"
+        f"{raw_html}\n"
+        "--- END QUESTION HTML ---"
+    )
+    
+    logger.info("Sending raw HTML to Gemini for interpretation and solving.")
+    
+    if GEMINI_CLIENT is None:
+        logger.error("Gemini client was not initialized. Exiting.")
+        return None
+        
+    response_text = None
+    for attempt in range(2):
+        try:
+            logger.info(f"Sending prompt to Gemini (attempt {attempt + 1})")
+            
+            response = GEMINI_CLIENT.generate_content(
+                contents=full_prompt, 
+                generation_config=dict(max_output_tokens=100, temperature=0.0)
+            )
+
+            if response.text:
+                response_text = response.text.strip()
+                logger.info(f"Received raw response from Gemini: {response_text}")
+                
+                # Parse the plain text response
+                match = re.search(r'Question:\s*(.+?)\s*Answer:\s*(.+)', response_text, re.DOTALL | re.IGNORECASE)
+                if match:
+                    question = match.group(1).strip()
+                    answer = match.group(2).strip()
+                    return {'question': question, 'answer': answer}
+                else:
+                    logger.warning("Could not parse Question/Answer from Gemini response.")
+                
+        except Exception as e:
+            logger.error(f"An error occurred during Gemini API call: {e}")
+            
+    return None
+
+def create_driver():
+    """Create a new Chrome driver with stable options."""
+    chrome_options = Options()
+    chrome_options.add_argument('--ignore-certificate-errors')
+    chrome_options.add_argument('--disable-gcm-api')
+    chrome_options.add_argument('--log-level=3')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    # Using ChromeDriverManager to handle the driver path
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=chrome_options)
+
+def get_smartscore(soup):
+    """Extract SmartScore from soup."""
+    smartscore_span = soup.find('span', class_='smartscore-text')
+    if smartscore_span:
+        return smartscore_span.get_text(strip=True)
+    return None
+
+def handle_feedback(driver, wait):
+    """
+    Checks for feedback after submission and handles next steps.
+    """
+    time.sleep(3)  # Wait for feedback to load
+    
+    # Parse current page source
+    html_content = driver.page_source
+    soup = BeautifulSoup(html_content, 'html.parser')
+    
+    # Check for SmartScore 100
+    smartscore_span = soup.find('span', class_='smartscore-text')
+    if smartscore_span and smartscore_span.get_text(strip=True) == '100':
+        logger.info("SmartScore reached 100. Stopping script.")
+        print("SmartScore: 100! Script complete.")
+        return True  # Stop flag
+    
+    # Check for incorrect feedback (using class 'feedback-header correct' as per user, but checking text "Sorry, incorrect...")
+    incorrect_header = soup.find('h2', class_='feedback-header correct')
+    if incorrect_header and 'Sorry, incorrect' in incorrect_header.get_text():
+        logger.info("Incorrect answer detected. Clicking 'Got it' to proceed.")
+        print("Incorrect. Moving to next question...")
+        
+        # Scroll to bottom before searching for button
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(1)  # Give time for scroll
+        
+        # Click "Got it" button by class and text (note the space in class)
+        try:
+            got_it_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'crisp-button ') and contains(text(), 'Got it')]")))
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", got_it_button)
+            time.sleep(0.5)
+            got_it_button.click()  # Try normal click first
+            logger.info("'Got it' button clicked.")
+            time.sleep(3)  # Wait for next question to load
+            return False  # Continue to next question
+        except ElementNotInteractableException:
+            logger.warning("Normal click failed, trying JS click.")
+            driver.execute_script("arguments[0].click();", got_it_button)
+            logger.info("'Got it' button clicked via JS.")
+            time.sleep(3)
+            return False
+        except TimeoutException:
+            logger.error("Could not find 'Got it' button.")
+            return False
+    
+    # Assume correct (or no feedback yet) - IXL usually auto-advances on correct
+    logger.info("Correct answer or no feedback. Waiting for auto-advance...")
+    print("Correct! Waiting for next question...")
+    time.sleep(3)  # Reduced to 3 seconds as per user
+    return False  # Continue
+
+def process_single_question(driver, wait):
+    """
+    Handles extraction, solving, submission, and feedback for one question.
+    """
+    # Extract question HTML
+    html_content = driver.page_source
+    raw_html = extract_raw_question_html(html_content)
+
+    if not raw_html:
+        logger.error("Could not extract question HTML. Skipping.")
+        return False
+
+    # Log the raw HTML
+    logger.info(f"Raw question HTML (length: {len(raw_html)} characters):\n{raw_html}")
+
+    structured_response = get_gemini_answer(GEMINI_MODEL, raw_html)
+
+    if structured_response:
+        question = structured_response.get('question', 'N/A')
+        answer = structured_response.get('answer', 'N/A')
+        
+        print(f"\nQuestion: {question}")
+        print(f"Answer: {answer}\n")
+        
+        logger.info(f"Question extracted by AI: {question}")
+        logger.info(f"Answer calculated by AI: {answer}")
+        
+        # Submit answer with error handling to prevent crash
+        try:
+            input_field = wait.until(EC.element_to_be_clickable((By.CLASS_NAME, "fillIn")))  # Changed to clickable to ensure interactable
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", input_field)
+            time.sleep(0.5)
+            input_field.clear()
+            input_field.send_keys(str(answer))
+            time.sleep(1)
+
+            # Click Submit
+            submit_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Submit') and @class='crisp-button']")))
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_button)
+            time.sleep(0.5)
+            submit_button.click()  # Try normal click first
+            logger.info("Submit button clicked successfully.")
+        except ElementNotInteractableException:
+            logger.warning("Normal click failed, trying JS click.")
+            driver.execute_script("arguments[0].click();", submit_button)
+            logger.info("Submit button clicked via JS.")
+        except Exception as submit_e:
+            logger.error(f"Submission error (continuing to feedback): {submit_e}")
+        
+        # Handle feedback regardless of submission success
+        return handle_feedback(driver, wait)
+    else:
+        logger.error("Gemini API failed to return a valid structured response.")
+        print("No valid answer extracted. Check ixl_script.log for details.")
+        return False
+
+def fetch_and_process_ixl(course_url):
+    logger.info(f"Starting script for IXL course URL: {course_url}")
+    kill_chromedriver_processes()
+
+    driver = None
+    try:
+        logger.info("Initializing ChromeDriver")
+        driver = create_driver()
+    except Exception as e:
+        logger.error(f"Error initializing ChromeDriver: {e}")
+        return
+
+    try:
+        # Navigate to course URL
+        logger.info(f"Navigating to {course_url}")
+        driver.get(course_url)
+        
+        # Click "Keep exploring" modal if present
+        logger.info("Checking for 'First time here?' modal")
+        try:
+            explore_button = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.CLASS_NAME, 'explore-btn'))
+            )
+            driver.execute_script("arguments[0].click();", explore_button)
+            WebDriverWait(driver, 5).until(
+                EC.invisibility_of_element_located((By.CLASS_NAME, 'ixl-modal-mask'))
+            )
+            logger.info("Modal dismissed.")
+        except:
+            logger.info("No modal found.")
+
+        # Automate login if prompted
+        logger.info("Filling in login credentials if prompted")
+        try:
+            username_field = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.ID, "qlusername"))
+            )
+            username_field.send_keys(IXL_USERNAME)
+            password_field = driver.find_element(By.ID, "qlpassword")
+            password_field.send_keys(IXL_PASSWORD)
+            signin_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.ID, "qlsubmit"))
+            )
+            driver.execute_script("arguments[0].click();", signin_button)
+            logger.info("Clicked sign-in button")
+            
+            # Wait for login to complete and page to redirect
+            logger.info("Waiting for login to complete and question page to load after login")
+            time.sleep(5)  # Initial wait for redirect
+            WebDriverWait(driver, 60).until(
+                EC.presence_of_element_located((By.CLASS_NAME, 'question-view'))
+            )
+            logger.info("Question section found after login")
+        except:
+             logger.info("Login fields not found, assuming already logged in or page changed.")
+             # Still wait for question view
+             logger.info("Waiting for question page to load")
+             WebDriverWait(driver, 60).until(
+                 EC.presence_of_element_located((By.CLASS_NAME, 'question-view'))
+             )
+             logger.info("Question section found")
+
+        wait = WebDriverWait(driver, 10)
+        
+        # Main loop: Process questions until SmartScore 100
+        while True:
+            stop_script = process_single_question(driver, wait)
+            if stop_script:
+                break
+            logger.info("Moving to next question...")
+            time.sleep(2)  # Brief pause before next cycle
+            
+    except Exception as e:
+        logger.error(f"An error occurred during script execution: {e}")
+        
+    finally:
+        if driver:
+            logger.info("Keeping ChromeDriver open for debugging. Check the browser window for the submission result.")
+            try:
+                input("Script is complete. Press Enter or Ctrl+C to exit and close the browser...\n")
+            except:
+                pass
+            try:
+                driver.quit()
+            except:
+                pass
+
+
+if __name__ == "__main__":
+    FINAL_SYSTEM_INSTRUCTION = (
+        "You are an expert math solver. The user will provide raw HTML code. "
+        "You must analyze the HTML, extract the full math problem, solve it, and respond in plain text with exactly: Question: [extracted problem] Answer: [final answer]. No other text."
+    )
+    
+    try:
+        logger.info("Initializing Gemini Client (New Method)")
+        genai.configure(api_key=GEMINI_API_KEY)
+        
+        # Initialize the client with the focused system instruction
+        GEMINI_CLIENT = genai.GenerativeModel(
+            model_name=GEMINI_MODEL, 
+            system_instruction=FINAL_SYSTEM_INSTRUCTION 
+        )
+        
+        ixl_course_url = input("Enter the IXL course URL (e.g., https://www.ixl.com/math/algebra-2/solve-linear-equations): ").strip()
+        
+        fetch_and_process_ixl(ixl_course_url)
+    except KeyboardInterrupt:
+        logger.info("Script interrupted by user (Ctrl+C)")
+    except Exception as e:
+        logger.critical(f"A fatal error occurred: {e}")
+        print(f"A fatal error occurred. Check ixl_script.log for details.")
