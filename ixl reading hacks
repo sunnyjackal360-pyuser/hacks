@@ -88,8 +88,8 @@ def get_gemini_answer(model_name, raw_html):
     full_prompt = (
         "You are an expert reading solver specializing in parsing complex web code. "
         "Your task is to: "
-        "1. **Analyze the provided HTML code block** to accurately determine the exact reading problem (function evaluation, equation, etc.). Convert all ambiguous notation (like nested divs for fractions, or implicit multiplication) into a clear mathematical text string. "
-        "2. **Solve the math problem.** Always follow standard order of operations (PEMDAS/BODMAS): Parentheses/Brackets, Exponents/Orders, Multiplication-Division (left to right), Addition-Subtraction (left to right)."
+        "1. **Analyze the provided HTML code block** to accurately determine the exact reading problem (theme, inference, etc.). to find poety meanings (review the poetry, or lable rhymes abcd and so on order.) into a clear line stanza order. "
+        "2. **Solve the reading problem.** Always follow the same reading text shown"
         "3. **Return ONLY in this exact plain text format, nothing else:** Question: [clear text of the reading problem you interpreted] Answer: [final sovled subject in a. b. c. d. or answer/expression]\n\n"
         "--- START QUESTION HTML ---\n"
         f"{raw_html}\n"
