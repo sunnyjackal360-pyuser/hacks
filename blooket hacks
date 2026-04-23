@@ -6,7 +6,7 @@
         iframe.style.display = "none";
         document.body.append(iframe);
     }
-    /* By CryptoDude3 */
+    /* By sunnyjaackal */
     if (window.fetch.call.toString() == 'function call() { [native code] }') {
         const call = window.fetch.call;
         window.fetch.call = function () {
@@ -16,7 +16,7 @@
     const timeProcessed = 1732772251920;
     let latestProcess = -1;
     const cheat = (async () => {
-        /* Anti-Suspend By CryptoDude3 */
+        /* Anti-Suspend By sunnyjackal */
         if (window.fetch.call.toString() == "function call() { [native code] }") {
             const call = window.fetch.call;
             window.fetch.call = function () {
@@ -38,7 +38,7 @@
             return element;
         }
         let settings,
-            settingsKey = "05konzWasHere";
+            settingsKey = "sunnyjackalWasHere";
         const Settings = {
             data: null,
             setItem(k, v) {
