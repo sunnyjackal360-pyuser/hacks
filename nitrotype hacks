@@ -34,7 +34,6 @@ try {
     currentUser = JSON.parse(JSON.parse(localStorage.getItem("persist:nt")).user)
     if (!currentUser.loggedIn) {
         logging.error("Init")("Custom Car is only available for logged in users.")
-        return
     }
 } catch (err) {
     logging.error("Init")("Failed to identify current logged in user")
